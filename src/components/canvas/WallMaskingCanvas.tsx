@@ -1,9 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Circle, Group, Image as KonvaImage, Layer, Line, Stage } from 'react-konva'
+import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Star } from 'react-konva'
 
 interface Wall {
 	id: string
 	points: number[]
+}
+
+interface WallMask {
+	id: string
+	mask_url: string
+	area: number
+	bbox: number[]
+	confidence: number
+	stability_score: number
 }
 
 interface WallMaskingCanvasProps {
@@ -19,6 +28,7 @@ interface WallMaskingCanvasProps {
 	appliedTextures: Record<string, string>
 	loading?: boolean
 	error?: string | null
+	wallMasks?: WallMask[]
 }
 
 const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
@@ -34,12 +44,15 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 	appliedTextures,
 	loading = false,
 	error = null,
+	wallMasks = [],
 }) => {
 	const [image, setImage] = useState<HTMLImageElement | null>(null)
+	const [maskImages, setMaskImages] = useState<Record<string, HTMLImageElement>>({})
 	const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 })
 	const [textureImages, setTextureImages] = useState<Record<string, HTMLImageElement>>({})
 	const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
 	const containerRef = useRef<HTMLDivElement>(null)
+	const loadedMaskIds = useRef<Set<string>>(new Set())
 
 	// Measure container size
 	const updateContainerSize = useCallback(() => {
@@ -82,6 +95,44 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 		img.crossOrigin = 'anonymous'
 		img.src = imageUrl
 	}, [imageUrl])
+
+	// Load wall mask images invisibly for interaction detection
+	useEffect(() => {
+		if (!wallMasks || wallMasks.length === 0) {
+			setMaskImages({})
+			loadedMaskIds.current.clear()
+			return
+		}
+
+		// Load masks that aren't already loaded/loading
+		wallMasks.forEach(wallMask => {
+			// Skip if already loaded or loading
+			if (loadedMaskIds.current.has(wallMask.id)) {
+				return
+			}
+
+			// Mark as loading to prevent duplicates
+			loadedMaskIds.current.add(wallMask.id)
+
+			const img = new window.Image()
+			img.crossOrigin = 'anonymous'
+
+			img.onload = () => {
+				setMaskImages(prev => ({
+					...prev,
+					[wallMask.id]: img,
+				}))
+			}
+
+			img.onerror = () => {
+				console.error('Failed to load wall mask:', wallMask.mask_url)
+				// Remove from loading set on error so it can be retried
+				loadedMaskIds.current.delete(wallMask.id)
+			}
+
+			img.src = wallMask.mask_url
+		})
+	}, [wallMasks])
 
 	// Calculate canvas size based on container and image dimensions
 	useEffect(() => {
@@ -133,6 +184,28 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 		return {
 			x: bounds.x + bounds.width / 2,
 			y: bounds.y + bounds.height / 2,
+		}
+	}
+
+	// Helper to create interactive area from wall mask bbox
+	const createInteractiveAreaFromBbox = (
+		bbox: number[],
+		canvasWidth: number,
+		canvasHeight: number
+	) => {
+		const [x, y, width, height] = bbox
+
+		// Convert bbox coordinates to canvas coordinates (simple scaling)
+		const scaleX = canvasWidth / (image?.width || 1)
+		const scaleY = canvasHeight / (image?.height || 1)
+
+		return {
+			x: x * scaleX,
+			y: y * scaleY,
+			width: width * scaleX,
+			height: height * scaleY,
+			centerX: (x + width / 2) * scaleX,
+			centerY: (y + height / 2) * scaleY,
 		}
 	}
 
@@ -249,8 +322,174 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 					/>
 				</Layer>
 
-				{/* Layer 2: Applied texture overlays */}
+				{/* Layer 2: Invisible AI Wall Interaction Areas */}
 				<Layer>
+					{wallMasks.map(wallMask => {
+						const interactiveArea = createInteractiveAreaFromBbox(
+							wallMask.bbox,
+							canvasSize.width,
+							canvasSize.height
+						)
+						const isSelected = selectedWallIds.includes(wallMask.id)
+						const hasTexture = !!appliedTextures[wallMask.id]
+
+						return (
+							<Group key={`ai-wall-${wallMask.id}`}>
+								{/* Invisible interaction area for AI-detected wall */}
+								<Line
+									points={[
+										interactiveArea.x,
+										interactiveArea.y,
+										interactiveArea.x + interactiveArea.width,
+										interactiveArea.y,
+										interactiveArea.x + interactiveArea.width,
+										interactiveArea.y + interactiveArea.height,
+										interactiveArea.x,
+										interactiveArea.y + interactiveArea.height,
+									]}
+									fill='rgba(255, 255, 255, 0.01)' // Virtually invisible
+									stroke='transparent'
+									strokeWidth={0}
+									closed={true}
+									listening={true}
+									perfectDrawEnabled={false}
+									onClick={e => {
+										// Skip selection if in drawing mode
+										if (isDrawingMode) {
+											return
+										}
+
+										// Handle event propagation
+										e.cancelBubble = true
+										if (e.evt) {
+											e.evt.preventDefault()
+											e.evt.stopPropagation()
+										}
+										handleWallClick(wallMask.id)
+									}}
+									onMouseEnter={e => {
+										if (!isDrawingMode) {
+											e.target.getStage()!.container().style.cursor = 'pointer'
+										}
+									}}
+									onMouseLeave={e => {
+										e.target.getStage()!.container().style.cursor = 'default'
+									}}
+								/>
+
+								{/* Enhanced visual indicator for AI-detected wall with brush icon */}
+								<Group
+									x={interactiveArea.centerX}
+									y={interactiveArea.centerY}
+									listening={false}
+									perfectDrawEnabled={false}
+								>
+									{/* Main button background with enhanced styling */}
+									<Circle
+										x={0}
+										y={0}
+										radius={16}
+										fill={isSelected ? '#8B5CF6' : hasTexture ? '#10B981' : '#FFFFFF'}
+										stroke={isSelected ? '#7C3AED' : hasTexture ? '#059669' : '#E5E7EB'}
+										strokeWidth={isSelected ? 3 : 2}
+										shadowColor={isSelected ? 'rgba(139, 92, 246, 0.4)' : 'rgba(0, 0, 0, 0.15)'}
+										shadowBlur={isSelected ? 8 : 4}
+										shadowOffset={{ x: 0, y: isSelected ? 3 : 2 }}
+										listening={false}
+										perfectDrawEnabled={false}
+									/>
+
+									{/* Inner glow effect for selected state */}
+									{isSelected && (
+										<Circle
+											x={0}
+											y={0}
+											radius={12}
+											fill='rgba(255, 255, 255, 0.3)'
+											listening={false}
+											perfectDrawEnabled={false}
+										/>
+									)}
+
+									{/* Brush icon - AI style with sparkles */}
+									<Group x={0} y={0} listening={false}>
+										{/* Brush handle */}
+										<Rect
+											x={-1}
+											y={-8}
+											width={2}
+											height={8}
+											fill={isSelected || hasTexture ? '#FFFFFF' : '#6B7280'}
+											cornerRadius={1}
+											listening={false}
+										/>
+
+										{/* Brush bristles */}
+										<Rect
+											x={-3}
+											y={-2}
+											width={6}
+											height={4}
+											fill={isSelected || hasTexture ? '#FFFFFF' : '#9CA3AF'}
+											cornerRadius={1}
+											listening={false}
+										/>
+
+										{/* AI sparkle indicators */}
+										<Star
+											x={-8}
+											y={-8}
+											numPoints={4}
+											innerRadius={1}
+											outerRadius={2}
+											fill={isSelected ? '#FFFFFF' : '#A855F7'}
+											opacity={0.8}
+											listening={false}
+										/>
+										<Star
+											x={8}
+											y={-6}
+											numPoints={4}
+											innerRadius={0.5}
+											outerRadius={1.5}
+											fill={isSelected ? '#FFFFFF' : '#A855F7'}
+											opacity={0.6}
+											listening={false}
+										/>
+										<Star
+											x={6}
+											y={6}
+											numPoints={4}
+											innerRadius={0.8}
+											outerRadius={1.8}
+											fill={isSelected ? '#FFFFFF' : '#A855F7'}
+											opacity={0.7}
+											listening={false}
+										/>
+									</Group>
+
+									{/* Selection pulse animation ring */}
+									{isSelected && (
+										<Circle
+											x={0}
+											y={0}
+											radius={20}
+											stroke='rgba(139, 92, 246, 0.3)'
+											strokeWidth={2}
+											dash={[3, 3]}
+											listening={false}
+											perfectDrawEnabled={false}
+										/>
+									)}
+								</Group>
+							</Group>
+						)
+					})}
+				</Layer>
+
+				{/* Layer 3: Applied texture overlays */}
+				<Layer>
+					{/* Textures for user-drawn walls */}
 					{walls
 						.filter(wall => appliedTextures[wall.id])
 						.map(wall => {
@@ -273,9 +512,50 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 								/>
 							)
 						})}
+
+					{/* Textures for AI-detected walls */}
+					{wallMasks
+						.filter(wallMask => appliedTextures[wallMask.id])
+						.map(wallMask => {
+							const textureUrl = appliedTextures[wallMask.id]
+							const textureImg = textureImages[textureUrl]
+							const maskImg = maskImages[wallMask.id]
+
+							// Only render if both texture and mask images are loaded
+							if (!textureImg || !maskImg) return null
+
+							// Use the actual mask image as a clipping path for texture application
+							const interactiveArea = createInteractiveAreaFromBbox(
+								wallMask.bbox,
+								canvasSize.width,
+								canvasSize.height
+							)
+
+							return (
+								<Line
+									key={`ai-texture-${wallMask.id}`}
+									points={[
+										interactiveArea.x,
+										interactiveArea.y,
+										interactiveArea.x + interactiveArea.width,
+										interactiveArea.y,
+										interactiveArea.x + interactiveArea.width,
+										interactiveArea.y + interactiveArea.height,
+										interactiveArea.x,
+										interactiveArea.y + interactiveArea.height,
+									]}
+									fillPatternImage={textureImg}
+									fillPatternRepeat='repeat'
+									fillPatternScaleX={0.5}
+									fillPatternScaleY={0.5}
+									closed={true}
+									listening={false}
+								/>
+							)
+						})}
 				</Layer>
 
-				{/* Layer 3: Wall selection areas and icons */}
+				{/* Layer 4: Wall selection areas and icons */}
 				<Layer>
 					{walls.map(wall => {
 						const bounds = calculateWallBounds(wall.points)
@@ -323,37 +603,96 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 									}}
 								/>
 
-								{/* Visual indicator at calculated center */}
+								{/* Enhanced visual indicator for manually drawn walls */}
 								<Group x={center.x} y={center.y} listening={false} perfectDrawEnabled={false}>
+									{/* Main button background with enhanced styling */}
 									<Circle
 										x={0}
 										y={0}
-										radius={12}
+										radius={16}
 										fill={isSelected ? '#F59E0B' : hasTexture ? '#10B981' : '#FFFFFF'}
-										stroke={isSelected ? '#D97706' : '#E5E7EB'}
-										strokeWidth={isSelected ? 2 : 1}
-										shadowColor='rgba(0, 0, 0, 0.3)'
-										shadowBlur={isSelected ? 3 : 2}
-										shadowOffset={{ x: 0, y: isSelected ? 2 : 1 }}
+										stroke={isSelected ? '#D97706' : hasTexture ? '#059669' : '#E5E7EB'}
+										strokeWidth={isSelected ? 3 : 2}
+										shadowColor={isSelected ? 'rgba(245, 158, 11, 0.4)' : 'rgba(0, 0, 0, 0.15)'}
+										shadowBlur={isSelected ? 8 : 4}
+										shadowOffset={{ x: 0, y: isSelected ? 3 : 2 }}
 										listening={false}
 										perfectDrawEnabled={false}
 									/>
 
-									<Circle
-										x={0}
-										y={0}
-										radius={6}
-										fill={isSelected ? '#FFFFFF' : hasTexture ? '#FFFFFF' : '#6B7280'}
-										listening={false}
-										perfectDrawEnabled={false}
-									/>
+									{/* Inner glow effect for selected state */}
+									{isSelected && (
+										<Circle
+											x={0}
+											y={0}
+											radius={12}
+											fill='rgba(255, 255, 255, 0.3)'
+											listening={false}
+											perfectDrawEnabled={false}
+										/>
+									)}
+
+									{/* Brush icon - Manual style with pencil accent */}
+									<Group x={0} y={0} listening={false}>
+										{/* Brush handle */}
+										<Rect
+											x={-1}
+											y={-8}
+											width={2}
+											height={8}
+											fill={isSelected || hasTexture ? '#FFFFFF' : '#6B7280'}
+											cornerRadius={1}
+											listening={false}
+										/>
+
+										{/* Brush bristles */}
+										<Rect
+											x={-3}
+											y={-2}
+											width={6}
+											height={4}
+											fill={isSelected || hasTexture ? '#FFFFFF' : '#9CA3AF'}
+											cornerRadius={1}
+											listening={false}
+										/>
+
+										{/* Manual drawing pencil accent */}
+										<Line
+											points={[-6, -6, -4, -4]}
+											stroke={isSelected ? '#FFFFFF' : '#F59E0B'}
+											strokeWidth={1.5}
+											lineCap='round'
+											listening={false}
+										/>
+										<Circle
+											x={-5}
+											y={-5}
+											radius={1}
+											fill={isSelected ? '#FFFFFF' : '#F59E0B'}
+											listening={false}
+										/>
+									</Group>
+
+									{/* Selection pulse animation ring */}
+									{isSelected && (
+										<Circle
+											x={0}
+											y={0}
+											radius={20}
+											stroke='rgba(245, 158, 11, 0.3)'
+											strokeWidth={2}
+											dash={[3, 3]}
+											listening={false}
+											perfectDrawEnabled={false}
+										/>
+									)}
 								</Group>
 							</Group>
 						)
 					})}
 				</Layer>
 
-				{/* Layer 4: Current drawing in progress (TOP LAYER) */}
+				{/* Layer 5: Current drawing in progress (TOP LAYER) */}
 				<Layer>
 					{isDrawingMode && currentDrawing.length > 0 && (
 						<Group>

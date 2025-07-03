@@ -10,7 +10,7 @@ import {
 	SparklesIcon,
 	TrashIcon,
 } from '@heroicons/react/24/outline'
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import WallMaskingCanvas from '../components/canvas/WallMaskingCanvas'
 import SidebarCatalog from '../components/catalog/SidebarCatalog'
 import HeaderBar from '../components/shared/HeaderBar'
@@ -31,10 +31,21 @@ const EditorPage: React.FC = () => {
 		imageUrl,
 		loading: imageLoading,
 		error: imageError,
+		wallMasks,
+		aiDetectionLoading,
+		selectedWallIds,
 		loadImageFromDataUrl,
+		detectWalls,
+		clearWallMasks,
+		// Multi-wall selection functions
+		toggleWallSelection,
+		selectAllAIWalls,
+		clearAllSelections,
+		selectMultipleWalls,
+		getSelectionSummary,
 	} = useImageUpload()
 
-	const [selectedWallIds, setSelectedWallIds] = useState<string[]>([])
+	// Remove local selectedWallIds state since it's now in the hook
 	const [isDrawingMode, setIsDrawingMode] = useState(false)
 	const [currentDrawing, setCurrentDrawing] = useState<number[]>([])
 	const [userDrawnWalls, setUserDrawnWalls] = useState<any[]>([])
@@ -51,6 +62,8 @@ const EditorPage: React.FC = () => {
 		return []
 	})
 
+	const fileInputRef = useRef<HTMLInputElement>(null)
+
 	// Load image from localStorage on mount
 	useEffect(() => {
 		const storedImageUrl = getImageDataUrl()
@@ -64,16 +77,52 @@ const EditorPage: React.FC = () => {
 		saveActionHistory(actionHistory as any)
 	}, [actionHistory])
 
-	// FIXED: Enhanced wall selection handler with more debugging
+	// Convert data URL to File object for AI detection
+	const dataURLtoFile = useCallback((dataurl: string, filename: string): File => {
+		const arr = dataurl.split(',')
+		const mime = arr[0].match(/:(.*?);/)![1]
+		const bstr = atob(arr[1])
+		let n = bstr.length
+		const u8arr = new Uint8Array(n)
+		while (n--) {
+			u8arr[n] = bstr.charCodeAt(n)
+		}
+		return new File([u8arr], filename, { type: mime })
+	}, [])
+
+	// Handle AI wall detection
+	const handleAIDetectWalls = useCallback(async () => {
+		if (!imageUrl) {
+			alert('Please upload an image first')
+			return
+		}
+
+		try {
+			// Convert current image URL to File for API
+			const imageFile = dataURLtoFile(imageUrl, 'room-image.jpg')
+			await detectWalls(imageFile)
+		} catch (error) {
+			console.error('AI detection failed:', error)
+			alert('AI detection failed. Please try again.')
+		}
+	}, [imageUrl, detectWalls, dataURLtoFile])
+
+	// Handle file input for re-uploading image for AI detection
+	const handleFileSelect = useCallback(
+		(event: React.ChangeEvent<HTMLInputElement>) => {
+			const file = event.target.files?.[0]
+			if (file) {
+				detectWalls(file)
+			}
+		},
+		[detectWalls]
+	)
+
+	// Enhanced wall selection handler using the hook's function
 	const handleWallSelect = useCallback(
 		(wallId: string) => {
 			console.log('🎯 EditorPage: handleWallSelect called with wallId:', wallId)
 			console.log('🎯 EditorPage: Current isDrawingMode:', isDrawingMode)
-			console.log('🎯 EditorPage: Current selectedWallIds:', selectedWallIds)
-			console.log(
-				'🎯 EditorPage: Available walls:',
-				userDrawnWalls.map(w => w.id)
-			)
 
 			// Skip if in drawing mode
 			if (isDrawingMode) {
@@ -81,25 +130,20 @@ const EditorPage: React.FC = () => {
 				return
 			}
 
-			// Use functional state update to avoid stale closure issues
-			setSelectedWallIds(prevSelected => {
-				const newSelection = prevSelected.includes(wallId)
-					? prevSelected.filter(id => id !== wallId)
-					: [...prevSelected, wallId]
-
-				console.log('🔄 EditorPage: Updated selection from', prevSelected, 'to', newSelection)
-				return newSelection
-			})
+			toggleWallSelection(wallId)
 		},
-		[isDrawingMode, userDrawnWalls]
-	) // Include userDrawnWalls to ensure fresh reference
+		[isDrawingMode, toggleWallSelection]
+	)
+
+	// Get selection summary for display
+	const selectionSummary = getSelectionSummary()
 
 	const handleStartDrawing = useCallback(() => {
 		console.log('🎨 Starting drawing mode')
 		setIsDrawingMode(true)
 		setCurrentDrawing([])
-		setSelectedWallIds([]) // Clear selection when starting to draw
-	}, [])
+		clearAllSelections() // Clear selection when starting to draw
+	}, [clearAllSelections])
 
 	const handleCompleteWall = useCallback(() => {
 		if (currentDrawing.length < 6) {
@@ -282,8 +326,8 @@ const EditorPage: React.FC = () => {
 		})
 
 		// Clear selections
-		setSelectedWallIds([])
-	}, [selectedWallIds])
+		clearAllSelections()
+	}, [selectedWallIds, clearAllSelections])
 
 	if (!imageUrl) {
 		return (
@@ -307,13 +351,40 @@ const EditorPage: React.FC = () => {
 					<div className='flex items-center justify-between mb-4'>
 						<div className='flex items-center gap-2'>
 							{!isDrawingMode ? (
-								<button
-									onClick={handleStartDrawing}
-									className='px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors duration-200'
-								>
-									<PencilIcon className='w-4 h-4' />
-									<span>Draw Wall</span>
-								</button>
+								<>
+									<button
+										onClick={handleStartDrawing}
+										className='px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors duration-200'
+									>
+										<PencilIcon className='w-4 h-4' />
+										<span>Draw Wall</span>
+									</button>
+									<button
+										onClick={handleAIDetectWalls}
+										disabled={aiDetectionLoading}
+										className='px-3 py-2 bg-purple-500 hover:bg-purple-600 disabled:bg-purple-300 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors duration-200'
+									>
+										<SparklesIcon
+											className={`w-4 h-4 ${aiDetectionLoading ? 'animate-spin' : ''}`}
+										/>
+										<span>{aiDetectionLoading ? 'Detecting...' : 'AI Detect Walls'}</span>
+									</button>
+									<input
+										ref={fileInputRef}
+										type='file'
+										accept='image/*'
+										onChange={handleFileSelect}
+										className='hidden'
+									/>
+									<button
+										onClick={() => fileInputRef.current?.click()}
+										disabled={aiDetectionLoading}
+										className='px-3 py-2 bg-indigo-500 hover:bg-indigo-600 disabled:bg-indigo-300 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors duration-200'
+									>
+										<PhotoIcon className='w-4 h-4' />
+										<span>Upload & Detect</span>
+									</button>
+								</>
 							) : (
 								<div className='flex items-center gap-2'>
 									<button
@@ -330,8 +401,20 @@ const EditorPage: React.FC = () => {
 							)}
 							<button className='px-3 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors duration-200'>
 								<PhotoIcon className='w-4 h-4' />
-								<span>Walls: {userDrawnWalls.length}</span>
+								<span>
+									Walls: {userDrawnWalls.length + wallMasks.length} ({userDrawnWalls.length} drawn,{' '}
+									{wallMasks.length} AI)
+								</span>
 							</button>
+							{wallMasks.length > 0 && (
+								<button
+									onClick={clearWallMasks}
+									className='px-3 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors duration-200'
+								>
+									<SparklesIcon className='w-4 h-4' />
+									<span>Clear AI Walls</span>
+								</button>
+							)}
 						</div>
 						<div className='flex items-center gap-2'>
 							<button
@@ -372,6 +455,28 @@ const EditorPage: React.FC = () => {
 						</div>
 					</div>
 
+					{/* Selection Summary UI */}
+					<div className='flex items-center gap-4 mb-2'>
+						<span className='text-sm text-gray-700'>
+							<b>{selectionSummary.total}</b> wall{selectionSummary.total === 1 ? '' : 's'} selected
+							<span className='ml-2 text-purple-600'>
+								({selectionSummary.aiWalls} AI, {selectionSummary.manualWalls} manual)
+							</span>
+						</span>
+						<button
+							onClick={selectAllAIWalls}
+							className='px-2 py-1 bg-purple-100 hover:bg-purple-200 text-purple-700 rounded text-xs font-medium transition-colors duration-150'
+						>
+							Select All AI Walls
+						</button>
+						<button
+							onClick={clearAllSelections}
+							className='px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-xs font-medium transition-colors duration-150'
+						>
+							Clear Selection
+						</button>
+					</div>
+
 					{/* Canvas */}
 					<div className='flex-1'>
 						<WallMaskingCanvas
@@ -385,8 +490,9 @@ const EditorPage: React.FC = () => {
 							onCanvasClick={handleCanvasClick}
 							isDrawingMode={isDrawingMode}
 							currentDrawing={currentDrawing}
-							loading={imageLoading}
+							loading={imageLoading || aiDetectionLoading}
 							error={imageError}
+							wallMasks={wallMasks}
 						/>
 					</div>
 
