@@ -41,10 +41,13 @@ export const useImageUpload = () => {
 			const formData = new FormData()
 			formData.append('image', imageFile)
 
-			const response = await fetch('http://localhost:3001/detect-walls', {
-				method: 'POST',
-				body: formData,
-			})
+			const response = await fetch(
+				'https://wallpaper-ai-server-dasturchioka1-dasturchioka1s-projects.vercel.app/detect-walls',
+				{
+					method: 'POST',
+					body: formData,
+				}
+			)
 
 			if (!response.ok) {
 				const errorData = await response.json()
