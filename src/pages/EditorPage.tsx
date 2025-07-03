@@ -31,12 +31,12 @@ const EditorPage: React.FC = () => {
 		imageUrl,
 		loading: imageLoading,
 		error: imageError,
-		wallMasks,
+		wallContours,
 		aiDetectionLoading,
 		selectedWallIds,
 		loadImageFromDataUrl,
 		detectWalls,
-		clearWallMasks,
+		clearWallContours,
 		// Multi-wall selection functions
 		toggleWallSelection,
 		selectAllAIWalls,
@@ -146,22 +146,15 @@ const EditorPage: React.FC = () => {
 	}, [clearAllSelections])
 
 	const handleCompleteWall = useCallback(() => {
-		if (currentDrawing.length < 6) {
-			console.log('⚠️ Not enough points to complete wall')
-			return
-		}
-
-		const wallId = `wall-${userDrawnWalls.length + 1}`
-		const newWall = {
-			id: wallId,
-			points: [...currentDrawing],
-		}
-
-		console.log('✅ Completing wall:', newWall)
-		setUserDrawnWalls(prev => [...prev, newWall])
+		if (currentDrawing.length < 6) return
+		setUserDrawnWalls(prev => {
+			const wallId = `wall-${prev.length + 1}`
+			const newWall = { id: wallId, points: [...currentDrawing] }
+			return [...prev, newWall]
+		})
 		setCurrentDrawing([])
 		setIsDrawingMode(false)
-	}, [currentDrawing, userDrawnWalls.length])
+	}, [currentDrawing])
 
 	const handleCanvasClick = useCallback(
 		(point: { x: number; y: number }) => {
@@ -402,13 +395,13 @@ const EditorPage: React.FC = () => {
 							<button className='px-3 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors duration-200'>
 								<PhotoIcon className='w-4 h-4' />
 								<span>
-									Walls: {userDrawnWalls.length + wallMasks.length} ({userDrawnWalls.length} drawn,{' '}
-									{wallMasks.length} AI)
+									Walls: {userDrawnWalls.length + wallContours.length} ({userDrawnWalls.length}{' '}
+									drawn, {wallContours.length} AI)
 								</span>
 							</button>
-							{wallMasks.length > 0 && (
+							{wallContours.length > 0 && (
 								<button
-									onClick={clearWallMasks}
+									onClick={clearWallContours}
 									className='px-3 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors duration-200'
 								>
 									<SparklesIcon className='w-4 h-4' />
@@ -492,7 +485,7 @@ const EditorPage: React.FC = () => {
 							currentDrawing={currentDrawing}
 							loading={imageLoading || aiDetectionLoading}
 							error={imageError}
-							wallMasks={wallMasks}
+							wallContours={wallContours}
 						/>
 					</div>
 

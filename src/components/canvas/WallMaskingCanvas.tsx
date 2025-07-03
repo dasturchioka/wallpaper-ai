@@ -1,18 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Star } from 'react-konva'
+import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage } from 'react-konva'
 
 interface Wall {
 	id: string
 	points: number[]
 }
 
-interface WallMask {
+interface WallContour {
 	id: string
-	mask_url: string
-	area: number
-	bbox: number[]
-	confidence: number
-	stability_score: number
+	points: number[][]
 }
 
 interface WallMaskingCanvasProps {
@@ -28,7 +24,7 @@ interface WallMaskingCanvasProps {
 	appliedTextures: Record<string, string>
 	loading?: boolean
 	error?: string | null
-	wallMasks?: WallMask[]
+	wallContours?: WallContour[]
 }
 
 const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
@@ -44,15 +40,12 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 	appliedTextures,
 	loading = false,
 	error = null,
-	wallMasks = [],
+	wallContours = [],
 }) => {
 	const [image, setImage] = useState<HTMLImageElement | null>(null)
-	const [maskImages, setMaskImages] = useState<Record<string, HTMLImageElement>>({})
 	const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 })
-	const [textureImages, setTextureImages] = useState<Record<string, HTMLImageElement>>({})
 	const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
 	const containerRef = useRef<HTMLDivElement>(null)
-	const loadedMaskIds = useRef<Set<string>>(new Set())
 
 	// Measure container size
 	const updateContainerSize = useCallback(() => {
@@ -95,44 +88,6 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 		img.crossOrigin = 'anonymous'
 		img.src = imageUrl
 	}, [imageUrl])
-
-	// Load wall mask images invisibly for interaction detection
-	useEffect(() => {
-		if (!wallMasks || wallMasks.length === 0) {
-			setMaskImages({})
-			loadedMaskIds.current.clear()
-			return
-		}
-
-		// Load masks that aren't already loaded/loading
-		wallMasks.forEach(wallMask => {
-			// Skip if already loaded or loading
-			if (loadedMaskIds.current.has(wallMask.id)) {
-				return
-			}
-
-			// Mark as loading to prevent duplicates
-			loadedMaskIds.current.add(wallMask.id)
-
-			const img = new window.Image()
-			img.crossOrigin = 'anonymous'
-
-			img.onload = () => {
-				setMaskImages(prev => ({
-					...prev,
-					[wallMask.id]: img,
-				}))
-			}
-
-			img.onerror = () => {
-				console.error('Failed to load wall mask:', wallMask.mask_url)
-				// Remove from loading set on error so it can be retried
-				loadedMaskIds.current.delete(wallMask.id)
-			}
-
-			img.src = wallMask.mask_url
-		})
-	}, [wallMasks])
 
 	// Calculate canvas size based on container and image dimensions
 	useEffect(() => {
@@ -209,38 +164,6 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 		}
 	}
 
-	// Load texture images when appliedTextures change
-	useEffect(() => {
-		const loadTextures = async () => {
-			const newTextureImages: Record<string, HTMLImageElement> = {}
-
-			for (const [wallId, textureUrl] of Object.entries(appliedTextures)) {
-				if (textureUrl && !textureImages[textureUrl]) {
-					try {
-						const img = new window.Image()
-						img.crossOrigin = 'anonymous'
-
-						await new Promise<void>((resolve, reject) => {
-							img.onload = () => resolve()
-							img.onerror = () => reject(new Error(`Failed to load texture: ${textureUrl}`))
-							img.src = textureUrl
-						})
-
-						newTextureImages[textureUrl] = img
-					} catch (error) {
-						console.error('Failed to load texture:', textureUrl, error)
-					}
-				}
-			}
-
-			if (Object.keys(newTextureImages).length > 0) {
-				setTextureImages(prev => ({ ...prev, ...newTextureImages }))
-			}
-		}
-
-		loadTextures()
-	}, [appliedTextures, textureImages])
-
 	// Memoized wall click handler with proper dependencies to prevent stale closures
 	const handleWallClick = useCallback(
 		(wallId: string) => {
@@ -273,6 +196,23 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 		},
 		[isDrawingMode, onCanvasClick]
 	)
+
+	// Helper to flatten contour points for Konva Line
+	const flattenContour = (points: number[][]) => points.flat()
+
+	// Helper to get centroid of a polygon
+	const getCentroid = (points: number[][]) => {
+		let x = 0,
+			y = 0
+		for (const [px, py] of points) {
+			x += px
+			y += py
+		}
+		return {
+			x: x / points.length,
+			y: y / points.length,
+		}
+	}
 
 	if (loading) {
 		return (
@@ -322,50 +262,32 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 					/>
 				</Layer>
 
-				{/* Layer 2: Invisible AI Wall Interaction Areas */}
+				{/* Layer 2: AI Wall Contour Interaction Areas */}
 				<Layer>
-					{wallMasks.map(wallMask => {
-						const interactiveArea = createInteractiveAreaFromBbox(
-							wallMask.bbox,
-							canvasSize.width,
-							canvasSize.height
-						)
-						const isSelected = selectedWallIds.includes(wallMask.id)
-						const hasTexture = !!appliedTextures[wallMask.id]
-
+					{wallContours.map(contour => {
+						const isSelected = selectedWallIds.includes(contour.id)
+						// Flatten points for Konva
+						const flatPoints = flattenContour(contour.points)
+						const centroid = getCentroid(contour.points)
 						return (
-							<Group key={`ai-wall-${wallMask.id}`}>
-								{/* Invisible interaction area for AI-detected wall */}
+							<Group key={contour.id}>
+								{/* Interactive polygon for wall contour */}
 								<Line
-									points={[
-										interactiveArea.x,
-										interactiveArea.y,
-										interactiveArea.x + interactiveArea.width,
-										interactiveArea.y,
-										interactiveArea.x + interactiveArea.width,
-										interactiveArea.y + interactiveArea.height,
-										interactiveArea.x,
-										interactiveArea.y + interactiveArea.height,
-									]}
-									fill='rgba(255, 255, 255, 0.01)' // Virtually invisible
+									points={flatPoints}
+									fill='rgba(255,255,255,0.01)'
 									stroke='transparent'
 									strokeWidth={0}
 									closed={true}
 									listening={true}
 									perfectDrawEnabled={false}
 									onClick={e => {
-										// Skip selection if in drawing mode
-										if (isDrawingMode) {
-											return
-										}
-
-										// Handle event propagation
+										if (isDrawingMode) return
 										e.cancelBubble = true
 										if (e.evt) {
 											e.evt.preventDefault()
 											e.evt.stopPropagation()
 										}
-										handleWallClick(wallMask.id)
+										handleWallClick(contour.id)
 									}}
 									onMouseEnter={e => {
 										if (!isDrawingMode) {
@@ -376,21 +298,14 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 										e.target.getStage()!.container().style.cursor = 'default'
 									}}
 								/>
-
-								{/* Enhanced visual indicator for AI-detected wall with brush icon */}
-								<Group
-									x={interactiveArea.centerX}
-									y={interactiveArea.centerY}
-									listening={false}
-									perfectDrawEnabled={false}
-								>
-									{/* Main button background with enhanced styling */}
+								{/* Brush icon at centroid */}
+								<Group x={centroid.x} y={centroid.y} listening={false} perfectDrawEnabled={false}>
 									<Circle
 										x={0}
 										y={0}
 										radius={16}
-										fill={isSelected ? '#8B5CF6' : hasTexture ? '#10B981' : '#FFFFFF'}
-										stroke={isSelected ? '#7C3AED' : hasTexture ? '#059669' : '#E5E7EB'}
+										fill={isSelected ? '#8B5CF6' : '#FFFFFF'}
+										stroke={isSelected ? '#7C3AED' : '#E5E7EB'}
 										strokeWidth={isSelected ? 3 : 2}
 										shadowColor={isSelected ? 'rgba(139, 92, 246, 0.4)' : 'rgba(0, 0, 0, 0.15)'}
 										shadowBlur={isSelected ? 8 : 4}
@@ -398,8 +313,6 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 										listening={false}
 										perfectDrawEnabled={false}
 									/>
-
-									{/* Inner glow effect for selected state */}
 									{isSelected && (
 										<Circle
 											x={0}
@@ -410,77 +323,26 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 											perfectDrawEnabled={false}
 										/>
 									)}
-
-									{/* Brush icon - AI style with sparkles */}
-									<Group x={0} y={0} listening={false}>
-										{/* Brush handle */}
-										<Rect
-											x={-1}
-											y={-8}
-											width={2}
-											height={8}
-											fill={isSelected || hasTexture ? '#FFFFFF' : '#6B7280'}
-											cornerRadius={1}
-											listening={false}
-										/>
-
-										{/* Brush bristles */}
-										<Rect
-											x={-3}
-											y={-2}
-											width={6}
-											height={4}
-											fill={isSelected || hasTexture ? '#FFFFFF' : '#9CA3AF'}
-											cornerRadius={1}
-											listening={false}
-										/>
-
-										{/* AI sparkle indicators */}
-										<Star
-											x={-8}
-											y={-8}
-											numPoints={4}
-											innerRadius={1}
-											outerRadius={2}
-											fill={isSelected ? '#FFFFFF' : '#A855F7'}
-											opacity={0.8}
-											listening={false}
-										/>
-										<Star
-											x={8}
-											y={-6}
-											numPoints={4}
-											innerRadius={0.5}
-											outerRadius={1.5}
-											fill={isSelected ? '#FFFFFF' : '#A855F7'}
-											opacity={0.6}
-											listening={false}
-										/>
-										<Star
-											x={6}
-											y={6}
-											numPoints={4}
-											innerRadius={0.8}
-											outerRadius={1.8}
-											fill={isSelected ? '#FFFFFF' : '#A855F7'}
-											opacity={0.7}
-											listening={false}
-										/>
-									</Group>
-
-									{/* Selection pulse animation ring */}
-									{isSelected && (
-										<Circle
-											x={0}
-											y={0}
-											radius={20}
-											stroke='rgba(139, 92, 246, 0.3)'
-											strokeWidth={2}
-											dash={[3, 3]}
-											listening={false}
-											perfectDrawEnabled={false}
-										/>
-									)}
+									{/* Brush handle */}
+									<Rect
+										x={-1}
+										y={-8}
+										width={2}
+										height={8}
+										fill={isSelected ? '#FFFFFF' : '#6B7280'}
+										cornerRadius={1}
+										listening={false}
+									/>
+									{/* Brush bristles */}
+									<Rect
+										x={-3}
+										y={-2}
+										width={6}
+										height={4}
+										fill={isSelected ? '#FFFFFF' : '#9CA3AF'}
+										cornerRadius={1}
+										listening={false}
+									/>
 								</Group>
 							</Group>
 						)
@@ -503,47 +365,6 @@ const WallMaskingCanvas: React.FC<WallMaskingCanvasProps> = ({
 								<Line
 									key={`texture-${wall.id}`}
 									points={wall.points}
-									fillPatternImage={textureImg}
-									fillPatternRepeat='repeat'
-									fillPatternScaleX={0.5}
-									fillPatternScaleY={0.5}
-									closed={true}
-									listening={false}
-								/>
-							)
-						})}
-
-					{/* Textures for AI-detected walls */}
-					{wallMasks
-						.filter(wallMask => appliedTextures[wallMask.id])
-						.map(wallMask => {
-							const textureUrl = appliedTextures[wallMask.id]
-							const textureImg = textureImages[textureUrl]
-							const maskImg = maskImages[wallMask.id]
-
-							// Only render if both texture and mask images are loaded
-							if (!textureImg || !maskImg) return null
-
-							// Use the actual mask image as a clipping path for texture application
-							const interactiveArea = createInteractiveAreaFromBbox(
-								wallMask.bbox,
-								canvasSize.width,
-								canvasSize.height
-							)
-
-							return (
-								<Line
-									key={`ai-texture-${wallMask.id}`}
-									points={[
-										interactiveArea.x,
-										interactiveArea.y,
-										interactiveArea.x + interactiveArea.width,
-										interactiveArea.y,
-										interactiveArea.x + interactiveArea.width,
-										interactiveArea.y + interactiveArea.height,
-										interactiveArea.x,
-										interactiveArea.y + interactiveArea.height,
-									]}
 									fillPatternImage={textureImg}
 									fillPatternRepeat='repeat'
 									fillPatternScaleX={0.5}

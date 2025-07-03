@@ -1,85 +1,67 @@
 import { useCallback, useState } from 'react'
+import axios from 'axios'
 
-interface Segment {
+interface WallContour {
 	id: string
-	mask_url: string
-	class_name: string
-	area: number
-	bbox: number[]
-	confidence: number
-	stability_score: number
-}
-
-interface WallMask {
-	id: string
-	mask_url: string
-	area: number
-	bbox: number[]
-	confidence: number
-	stability_score: number
+	points: number[][] // Each contour is an array of [x, y] pairs
 }
 
 export const useImageUpload = () => {
 	const [imageUrl, setImageUrl] = useState<string | null>(null)
 	const [loading, setLoading] = useState(false)
 	const [error, setError] = useState<string | null>(null)
-	const [wallMasks, setWallMasks] = useState<WallMask[]>([])
+	const [wallContours, setWallContours] = useState<WallContour[]>([])
 	const [aiDetectionLoading, setAiDetectionLoading] = useState(false)
 	const [selectedWallIds, setSelectedWallIds] = useState<string[]>([])
 
 	const loadImageFromDataUrl = useCallback(async (dataUrl: string) => {
 		setImageUrl(dataUrl)
-		setLoading(false) // Just load the image, no processing needed
+		setLoading(false)
 		setError(null)
 	}, [])
 
 	const detectWalls = useCallback(async (imageFile: File) => {
 		setAiDetectionLoading(true)
 		setError(null)
-
 		try {
+			// Validate file type before upload
+			const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/svg+xml']
+			const forbidden = ['image/heic', 'image/gif', 'image/webp']
+			if (forbidden.includes(imageFile.type)) {
+				throw new Error('Unsupported image format. Please upload a JPG, PNG, or SVG.')
+			}
+			if (!allowed.includes(imageFile.type)) {
+				throw new Error('Unsupported image format. Please upload a JPG, PNG, or SVG.')
+			}
 			const formData = new FormData()
-			formData.append('image', imageFile)
-
-			const response = await fetch(
-				'https://wallpaper-ai-server-dasturchioka1-dasturchioka1s-projects.vercel.app/detect-walls',
+			formData.append('room_image', imageFile)
+			const response = await axios.post(
+				'https://vision-api.p.rapidapi.com/segmentation/walls',
+				formData,
 				{
-					method: 'POST',
-					body: formData,
+					headers: {
+						'x-rapidapi-key': 'cc493c1a46msh57c0cd2bf14e2f2p1596e7jsn224007c4a617',
+						'x-rapidapi-host': 'vision-api.p.rapidapi.com',
+						Accept: 'application/json',
+					},
 				}
 			)
-
-			if (!response.ok) {
-				const errorData = await response.json()
+			if (response.status !== 200) {
+				const errorData = response.data
 				throw new Error(
 					errorData.details || errorData.error || `AI detection failed: ${response.statusText}`
 				)
 			}
-
-			const data = await response.json()
-			const allSegments: Segment[] = data.segments || []
-
-			// 🎯 Frontend filtering: Only use wall segments
-			const wallSegments = allSegments.filter(
-				segment => segment.class_name && segment.class_name.toLowerCase() === 'wall'
-			)
-
-			console.log(`📊 Total segments: ${allSegments.length}, Wall segments: ${wallSegments.length}`)
-
-			// Convert to WallMask format (remove class_name since we know they're all walls)
-			const wallMasks: WallMask[] = wallSegments.map(segment => ({
-				id: segment.id,
-				mask_url: segment.mask_url,
-				area: segment.area,
-				bbox: segment.bbox,
-				confidence: segment.confidence,
-				stability_score: segment.stability_score,
+			const data = response.data
+			const contours: number[][][] = data.contours || []
+			// Each contour is an array of [ [x1, y1], [x2, y2], ... ]
+			const wallContours: WallContour[] = contours.map((contour, i) => ({
+				id: `contour-${i + 1}`,
+				points: contour,
 			}))
-
-			setWallMasks(wallMasks)
-			// Clear any existing selections when new walls are detected
+			setWallContours(wallContours)
 			setSelectedWallIds([])
-			return wallMasks
+			return wallContours
 		} catch (err) {
 			const errorMessage = err instanceof Error ? err.message : 'Failed to detect walls'
 			setError(errorMessage)
@@ -89,11 +71,10 @@ export const useImageUpload = () => {
 		}
 	}, [])
 
-	const clearWallMasks = useCallback(() => {
-		setWallMasks([])
-		// Clear selections for AI walls when clearing masks
-		setSelectedWallIds(prev => prev.filter(id => !wallMasks.some(mask => mask.id === id)))
-	}, [wallMasks])
+	const clearWallContours = useCallback(() => {
+		setWallContours([])
+		setSelectedWallIds([])
+	}, [])
 
 	// Multi-wall selection functions
 	const toggleWallSelection = useCallback((wallId: string) => {
@@ -103,12 +84,12 @@ export const useImageUpload = () => {
 	}, [])
 
 	const selectAllAIWalls = useCallback(() => {
-		const aiWallIds = wallMasks.map(mask => mask.id)
+		const aiWallIds = wallContours.map(mask => mask.id)
 		setSelectedWallIds(prev => {
 			const nonAIWalls = prev.filter(id => !aiWallIds.includes(id))
 			return [...nonAIWalls, ...aiWallIds]
 		})
-	}, [wallMasks])
+	}, [wallContours])
 
 	const clearAllSelections = useCallback(() => {
 		setSelectedWallIds([])
@@ -121,28 +102,27 @@ export const useImageUpload = () => {
 	// Selection summary helpers
 	const getSelectionSummary = useCallback(() => {
 		const aiWallsSelected = selectedWallIds.filter(id =>
-			wallMasks.some(mask => mask.id === id)
+			wallContours.some(mask => mask.id === id)
 		).length
 		const manualWallsSelected = selectedWallIds.length - aiWallsSelected
-
 		return {
 			total: selectedWallIds.length,
 			aiWalls: aiWallsSelected,
 			manualWalls: manualWallsSelected,
 			isEmpty: selectedWallIds.length === 0,
 		}
-	}, [selectedWallIds, wallMasks])
+	}, [selectedWallIds, wallContours])
 
 	return {
 		imageUrl,
 		loading,
 		error,
-		wallMasks,
+		wallContours,
 		aiDetectionLoading,
 		selectedWallIds,
 		loadImageFromDataUrl,
 		detectWalls,
-		clearWallMasks,
+		clearWallContours,
 		// Multi-wall selection functions
 		toggleWallSelection,
 		selectAllAIWalls,
